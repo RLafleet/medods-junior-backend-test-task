@@ -249,6 +249,63 @@ func TestGenerateDates_EvenOdd_Odd(t *testing.T) {
 	assertDates(t, want, got)
 }
 
+func TestGenerateUpTo_UsesTemplateTimezoneGenerationWindow(t *testing.T) {
+	svc, tRepo, taskRepo := newTestService()
+	svc.now = func() time.Time { return time.Date(2024, 1, 1, 23, 30, 0, 0, time.UTC) }
+
+	n := 1
+	tRepo.templates = []templatedomain.Template{
+		{
+			ID:             1,
+			Title:          "Daily Tokyo",
+			IsActive:       true,
+			RecurrenceType: templatedomain.RecurrenceDaily,
+			StartDate:      date(2024, 1, 1),
+			Timezone:       "Asia/Tokyo",
+			EveryNDays:     &n,
+		},
+	}
+
+	until := time.Date(2024, 1, 2, 23, 30, 0, 0, time.UTC)
+	if err := svc.GenerateUpTo(context.Background(), until); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []time.Time{
+		date(2024, 1, 2),
+		date(2024, 1, 3),
+	}
+	assertScheduledDates(t, taskRepo.created, want)
+}
+
+func TestGenerateUpTo_SpecificDatesRespectsTimezoneUntilBoundary(t *testing.T) {
+	svc, tRepo, taskRepo := newTestService()
+	svc.now = func() time.Time { return time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC) }
+
+	tRepo.templates = []templatedomain.Template{
+		{
+			ID:             1,
+			Title:          "Specific LA",
+			IsActive:       true,
+			RecurrenceType: templatedomain.RecurrenceSpecificDates,
+			StartDate:      date(2024, 1, 1),
+			Timezone:       "America/Los_Angeles",
+			SpecificDates: []time.Time{
+				date(2024, 1, 10),
+			},
+		},
+	}
+
+	until := time.Date(2024, 1, 10, 1, 0, 0, 0, time.UTC)
+	if err := svc.GenerateUpTo(context.Background(), until); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(taskRepo.created) != 0 {
+		t.Fatalf("expected no generated tasks before local 2024-01-10 boundary, got %d", len(taskRepo.created))
+	}
+}
+
 func TestValidation_EveryNDaysZero(t *testing.T) {
 	svc, _, _ := newTestService()
 	n := 0
@@ -447,6 +504,27 @@ func (m *idempotentMockTaskRepo) CreateFromTemplate(_ context.Context, task *tas
 	key := fmt.Sprintf("%d:%s", *task.TemplateID, task.ScheduledFor.Format("2006-01-02"))
 	m.createdKeys[key] = struct{}{}
 	return nil
+}
+
+func assertScheduledDates(t *testing.T, tasks []taskdomain.Task, want []time.Time) {
+	t.Helper()
+
+	if len(tasks) != len(want) {
+		t.Fatalf("expected %d generated tasks, got %d", len(want), len(tasks))
+	}
+
+	for i := range want {
+		if tasks[i].ScheduledFor == nil {
+			t.Fatalf("task[%d] has nil scheduled_for", i)
+		}
+		got := *tasks[i].ScheduledFor
+		if !got.Equal(want[i]) {
+			t.Errorf("task[%d] scheduled_for: want %s, got %s", i, want[i].Format("2006-01-02"), got.Format("2006-01-02"))
+		}
+		if got.Location() != time.UTC {
+			t.Errorf("task[%d] scheduled_for location: want UTC, got %s", i, got.Location())
+		}
+	}
 }
 
 func assertDates(t *testing.T, want, got []time.Time) {

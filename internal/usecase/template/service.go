@@ -121,18 +121,23 @@ func (s *Service) GenerateUpTo(ctx context.Context, until time.Time) error {
 		return err
 	}
 
-	today := truncateToDate(s.now())
-
 	for _, t := range templates {
-		from := truncateToDate(t.StartDate)
+		loc, err := loadLocationOrUTC(t.Timezone)
+		if err != nil {
+			return fmt.Errorf("invalid template timezone %q for template_id=%d: %w", t.Timezone, t.ID, err)
+		}
+
+		today := truncateToDateInLocation(s.now(), loc)
+		from := civilDateInLocation(t.StartDate, loc)
 		if today.After(from) {
 			from = today
 		}
 
-		dates := generateDates(t, from, truncateToDate(until))
+		untilLocal := truncateToDateInLocation(until, loc)
+		dates := generateDatesInLocation(t, from, untilLocal, loc)
 
 		for _, d := range dates {
-			scheduledFor := d
+			scheduledFor := dateAsUTCMidnight(d)
 			task := &taskdomain.Task{
 				Title:        t.Title,
 				Description:  t.Description,
@@ -153,6 +158,14 @@ func (s *Service) GenerateUpTo(ctx context.Context, until time.Time) error {
 }
 
 func generateDates(t templatedomain.Template, from, until time.Time) []time.Time {
+	return generateDatesInLocation(t, from, until, from.Location())
+}
+
+func generateDatesInLocation(t templatedomain.Template, from, until time.Time, loc *time.Location) []time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+
 	var dates []time.Time
 
 	switch t.RecurrenceType {
@@ -162,13 +175,17 @@ func generateDates(t templatedomain.Template, from, until time.Time) []time.Time
 		}
 
 		n := *t.EveryNDays
-		start := truncateToDate(t.StartDate)
+		start := civilDateInLocation(t.StartDate, loc)
+		rangeStart := from
+		if rangeStart.Before(start) {
+			rangeStart = start
+		}
 
-		diff := int(from.Sub(start).Hours() / 24)
+		diff := daysBetweenDates(start, rangeStart)
 		offset := diff % n
-		firstInRange := from
+		firstInRange := rangeStart
 		if offset != 0 {
-			firstInRange = from.AddDate(0, 0, n-offset)
+			firstInRange = rangeStart.AddDate(0, 0, n-offset)
 		}
 
 		for d := firstInRange; !d.After(until); d = d.AddDate(0, 0, n) {
@@ -183,14 +200,14 @@ func generateDates(t templatedomain.Template, from, until time.Time) []time.Time
 		day := *t.DayOfMonth
 
 		for year, month := from.Year(), from.Month(); ; {
-			candidate := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
+			candidate := time.Date(year, month, 1, 0, 0, 0, 0, loc)
 			if candidate.After(until) {
 				break
 			}
 
-			daysInMonth := daysIn(year, month)
+			daysInMonth := daysIn(year, month, loc)
 			if day <= daysInMonth {
-				d := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+				d := time.Date(year, month, day, 0, 0, 0, 0, loc)
 				if !d.Before(from) && !d.After(until) {
 					dates = append(dates, d)
 				}
@@ -205,7 +222,7 @@ func generateDates(t templatedomain.Template, from, until time.Time) []time.Time
 
 	case templatedomain.RecurrenceSpecificDates:
 		for _, sd := range t.SpecificDates {
-			d := truncateToDate(sd)
+			d := civilDateInLocation(sd, loc)
 			if !d.Before(from) && !d.After(until) {
 				dates = append(dates, d)
 			}
@@ -324,9 +341,51 @@ func validateInput(
 }
 
 func truncateToDate(t time.Time) time.Time {
+	return dateAsUTCMidnight(t)
+}
+
+func truncateToDateInLocation(t time.Time, loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+
+	localTime := t.In(loc)
+	return time.Date(localTime.Year(), localTime.Month(), localTime.Day(), 0, 0, 0, 0, loc)
+}
+
+func civilDateInLocation(t time.Time, loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+
+	year, month, day := t.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, loc)
+}
+
+func dateAsUTCMidnight(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
-func daysIn(year int, month time.Month) int {
-	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+func daysIn(year int, month time.Month, loc *time.Location) int {
+	if loc == nil {
+		loc = time.UTC
+	}
+	return time.Date(year, month+1, 0, 0, 0, 0, 0, loc).Day()
+}
+
+func daysBetweenDates(from, to time.Time) int {
+	return dateOrdinal(to) - dateOrdinal(from)
+}
+
+func dateOrdinal(t time.Time) int {
+	year, month, day := t.Date()
+	return int(time.Date(year, month, day, 0, 0, 0, 0, time.UTC).Unix() / 86400)
+}
+
+func loadLocationOrUTC(timezone string) (*time.Location, error) {
+	if timezone == "" {
+		timezone = "UTC"
+	}
+
+	return time.LoadLocation(timezone)
 }
