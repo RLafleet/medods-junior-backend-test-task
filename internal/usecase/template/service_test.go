@@ -3,6 +3,7 @@ package template
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -357,8 +358,7 @@ func TestValidation_InvalidTimezone(t *testing.T) {
 
 func TestGenerateUpTo_Idempotent(t *testing.T) {
 	tRepo := &mockTemplateRepo{}
-	callCount := 0
-	idempotentTaskRepo := &idempotentMockTaskRepo{&callCount}
+	idempotentTaskRepo := &idempotentMockTaskRepo{createdKeys: map[string]struct{}{}}
 	svc := NewService(tRepo, idempotentTaskRepo)
 	svc.now = func() time.Time { return date(2024, 1, 1) }
 
@@ -381,14 +381,17 @@ func TestGenerateUpTo_Idempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	firstCount := callCount
+	firstUniqueCount := len(idempotentTaskRepo.createdKeys)
+	if firstUniqueCount == 0 {
+		t.Fatal("expected non-zero generated unique dates on first run")
+	}
 
 	if err := svc.GenerateUpTo(context.Background(), until); err != nil {
 		t.Fatal(err)
 	}
 
-	if callCount != firstCount*2 {
-		t.Fatalf("expected %d total calls on second run (idempotent), got %d", firstCount*2, callCount)
+	if len(idempotentTaskRepo.createdKeys) != firstUniqueCount {
+		t.Fatalf("expected unique generated keys count to stay %d after second run, got %d", firstUniqueCount, len(idempotentTaskRepo.createdKeys))
 	}
 }
 
@@ -433,11 +436,16 @@ func TestGenerateUpTo_TemplateUpdateAffectsOnlyFuture(t *testing.T) {
 }
 
 type idempotentMockTaskRepo struct {
-	callCount *int
+	createdKeys map[string]struct{}
 }
 
-func (m *idempotentMockTaskRepo) CreateFromTemplate(_ context.Context, _ *taskdomain.Task) error {
-	*m.callCount++
+func (m *idempotentMockTaskRepo) CreateFromTemplate(_ context.Context, task *taskdomain.Task) error {
+	if task.TemplateID == nil || task.ScheduledFor == nil {
+		return errors.New("template id and scheduled_for are required")
+	}
+
+	key := fmt.Sprintf("%d:%s", *task.TemplateID, task.ScheduledFor.Format("2006-01-02"))
+	m.createdKeys[key] = struct{}{}
 	return nil
 }
 
