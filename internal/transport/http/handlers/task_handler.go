@@ -5,19 +5,22 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gorilla/mux"
 
 	taskdomain "example.com/taskservice/internal/domain/task"
 	taskusecase "example.com/taskservice/internal/usecase/task"
+	templateusecase "example.com/taskservice/internal/usecase/template"
 )
 
 type TaskHandler struct {
-	usecase taskusecase.Usecase
+	usecase         taskusecase.Usecase
+	templateUsecase templateusecase.Usecase
 }
 
-func NewTaskHandler(usecase taskusecase.Usecase) *TaskHandler {
-	return &TaskHandler{usecase: usecase}
+func NewTaskHandler(usecase taskusecase.Usecase, templateUsecase templateusecase.Usecase) *TaskHandler {
+	return &TaskHandler{usecase: usecase, templateUsecase: templateUsecase}
 }
 
 func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +101,12 @@ func (h *TaskHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
+	horizon := time.Now().UTC().AddDate(0, 0, 30)
+	if err := h.templateUsecase.GenerateUpTo(r.Context(), horizon); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
 	tasks, err := h.usecase.List(r.Context())
 	if err != nil {
 		writeUsecaseError(w, err)
